@@ -59,8 +59,15 @@ export default {
     // Root path returns simple info
     if (path === "/" || path === "") {
       return new Response(
-        "GitHub Logo Redirect\nUsage: /{owner} or /{owner}/{repo}",
-        { headers: { "Content-Type": "text/plain" } }
+        `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>ghlogo</title></head>
+<body style="font-family:system-ui;max-width:600px;margin:2rem auto;padding:0 1rem">
+<h1>ghlogo</h1>
+<p>Redirect to GitHub og:image</p>
+<p><strong>Usage:</strong> <code>/{owner}</code> or <code>/{owner}/{repo}</code></p>
+<p><a href="https://github.com/heathdutton/ghlogo">GitHub</a></p>
+</body></html>`,
+        { headers: { "Content-Type": "text/html" } }
       );
     }
 
