@@ -13,10 +13,10 @@ https://ghlogo.heathdutton.workers.dev/{owner}/{repo}
 
 | URL | Redirects to |
 |-----|--------------|
-| `/anthropics` | Anthropic's org avatar |
-| `/anthropics/claude-code` | claude-code repo's social preview |
-| `/torvalds` | Linus Torvalds' avatar |
-| `/torvalds/linux` | Linux repo's social preview |
+| [/anthropics](https://ghlogo.heathdutton.workers.dev/anthropics) | Anthropic's org avatar |
+| [/anthropics/claude-code](https://ghlogo.heathdutton.workers.dev/anthropics/claude-code) | claude-code repo's social preview |
+| [/torvalds](https://ghlogo.heathdutton.workers.dev/torvalds) | Linus Torvalds' avatar |
+| [/torvalds/linux](https://ghlogo.heathdutton.workers.dev/torvalds/linux) | Linux repo's social preview |
 
 ### In Markdown
 
@@ -34,7 +34,7 @@ https://ghlogo.heathdutton.workers.dev/{owner}/{repo}
 
 1. Fetches the GitHub page for the given path
 2. Extracts the `<meta property="og:image">` URL
-3. Returns a 302 redirect to that image
+3. Returns a 302 (temporary) redirect to that image - temporary because the og:image URL changes when owners update their social preview
 4. Caches the redirect in memory for 1 hour
 
 The in-memory cache persists for the lifetime of the worker isolate, reducing latency for repeated requests.
