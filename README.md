@@ -13,8 +13,8 @@ https://ghlogo.heathdutton.workers.dev/{owner}/{repo}
 
 | URL | Redirects to |
 |-----|--------------|
-| [/anthropics](https://ghlogo.heathdutton.workers.dev/anthropics) | Anthropic's org avatar |
-| [/anthropics/claude-code](https://ghlogo.heathdutton.workers.dev/anthropics/claude-code) | claude-code repo's social preview |
+| [/microsoft](https://ghlogo.heathdutton.workers.dev/microsoft) | Microsoft's org avatar |
+| [/microsoft/vscode](https://ghlogo.heathdutton.workers.dev/microsoft/vscode) | VS Code repo's social preview |
 | [/torvalds](https://ghlogo.heathdutton.workers.dev/torvalds) | Linus Torvalds' avatar |
 | [/torvalds/linux](https://ghlogo.heathdutton.workers.dev/torvalds/linux) | Linux repo's social preview |
 
