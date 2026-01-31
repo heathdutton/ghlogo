@@ -125,16 +125,207 @@ export default {
     const rawPath = url.pathname;
     const path = normalizePath(rawPath);
 
-    // Root path returns simple info
+    // Root path returns interactive landing page
     if (path === "/") {
+      const baseUrl = url.origin;
       const html = `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>ghlogo</title></head>
-<body style="font-family:system-ui;max-width:600px;margin:2rem auto;padding:0 1rem">
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ghlogo - GitHub Logo Redirect</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 2rem 1rem;
+    background: #0d1117;
+    color: #e6edf3;
+    min-height: 100vh;
+  }
+  h1 { margin: 0 0 0.5rem; font-size: 2rem; }
+  .subtitle { color: #8b949e; margin-bottom: 2rem; }
+  .subtitle a { color: #58a6ff; text-decoration: none; }
+  .subtitle a:hover { text-decoration: underline; }
+  label { display: block; font-weight: 500; margin-bottom: 0.5rem; }
+  input[type="text"] {
+    width: 100%;
+    padding: 0.75rem;
+    font-size: 1rem;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    background: #161b22;
+    color: #e6edf3;
+    margin-bottom: 1.5rem;
+  }
+  input[type="text"]:focus {
+    outline: none;
+    border-color: #58a6ff;
+    box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.3);
+  }
+  .output-group { margin-bottom: 1rem; }
+  .output-label {
+    font-size: 0.875rem;
+    color: #8b949e;
+    margin-bottom: 0.25rem;
+  }
+  .output-row {
+    display: flex;
+    gap: 0.5rem;
+  }
+  .output-box {
+    flex: 1;
+    padding: 0.625rem 0.75rem;
+    font-family: ui-monospace, monospace;
+    font-size: 0.875rem;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    color: #e6edf3;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+  .copy-btn {
+    padding: 0.625rem 1rem;
+    font-size: 0.875rem;
+    background: #21262d;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    color: #e6edf3;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s;
+  }
+  .copy-btn:hover { background: #30363d; }
+  .copy-btn.copied { background: #238636; border-color: #238636; }
+  .preview-section {
+    margin-top: 2rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid #30363d;
+  }
+  .preview-label { font-weight: 500; margin-bottom: 0.75rem; }
+  .preview-container {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 1rem;
+    min-height: 120px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .preview-container img {
+    max-width: 100%;
+    max-height: 300px;
+    border-radius: 6px;
+  }
+  .preview-placeholder {
+    color: #8b949e;
+    font-style: italic;
+  }
+  .preview-error {
+    color: #f85149;
+  }
+</style>
+</head>
+<body>
 <h1>ghlogo</h1>
-<p>Redirect to GitHub og:image</p>
-<p><strong>Usage:</strong> <code>/{owner}</code> or <code>/{owner}/{repo}</code></p>
-<p><a href="https://github.com/heathdutton/ghlogo">GitHub</a></p>
-</body></html>`;
+<p class="subtitle">Redirect to GitHub og:image &middot; <a href="https://github.com/heathdutton/ghlogo">Source</a></p>
+
+<label for="input">Owner or Owner/Repo</label>
+<input type="text" id="input" placeholder="microsoft/vscode" autocomplete="off" spellcheck="false">
+
+<div class="output-group">
+  <div class="output-label">URL</div>
+  <div class="output-row">
+    <div class="output-box" id="url-output">${baseUrl}/microsoft/vscode</div>
+    <button class="copy-btn" data-target="url-output">Copy</button>
+  </div>
+</div>
+
+<div class="output-group">
+  <div class="output-label">HTML</div>
+  <div class="output-row">
+    <div class="output-box" id="html-output">&lt;img src="${baseUrl}/microsoft/vscode" alt="microsoft/vscode"&gt;</div>
+    <button class="copy-btn" data-target="html-output">Copy</button>
+  </div>
+</div>
+
+<div class="output-group">
+  <div class="output-label">Markdown</div>
+  <div class="output-row">
+    <div class="output-box" id="md-output">![microsoft/vscode](${baseUrl}/microsoft/vscode)</div>
+    <button class="copy-btn" data-target="md-output">Copy</button>
+  </div>
+</div>
+
+<div class="preview-section">
+  <div class="preview-label">Preview</div>
+  <div class="preview-container" id="preview">
+    <span class="preview-placeholder">Enter an owner or repo to preview</span>
+  </div>
+</div>
+
+<script>
+(function() {
+  const baseUrl = '${baseUrl}';
+  const input = document.getElementById('input');
+  const urlOut = document.getElementById('url-output');
+  const htmlOut = document.getElementById('html-output');
+  const mdOut = document.getElementById('md-output');
+  const preview = document.getElementById('preview');
+  let debounceTimer;
+
+  function escapeHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function update() {
+    const raw = input.value.trim().replace(/^[\\/@]+/, '').replace(/\\/+$/, '');
+    const path = raw || 'microsoft/vscode';
+    const fullUrl = baseUrl + '/' + path;
+
+    urlOut.textContent = fullUrl;
+    htmlOut.innerHTML = escapeHtml('<img src="' + fullUrl + '" alt="' + path + '">');
+    mdOut.textContent = '![' + path + '](' + fullUrl + ')';
+
+    clearTimeout(debounceTimer);
+    if (raw) {
+      debounceTimer = setTimeout(function() { loadPreview(fullUrl); }, 400);
+    } else {
+      preview.innerHTML = '<span class="preview-placeholder">Enter an owner or repo to preview</span>';
+    }
+  }
+
+  function loadPreview(url) {
+    preview.innerHTML = '<span class="preview-placeholder">Loading...</span>';
+    const img = new Image();
+    img.onload = function() { preview.innerHTML = ''; preview.appendChild(img); };
+    img.onerror = function() { preview.innerHTML = '<span class="preview-error">Not found or no image available</span>'; };
+    img.src = url;
+  }
+
+  input.addEventListener('input', update);
+
+  document.querySelectorAll('.copy-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      const target = document.getElementById(btn.dataset.target);
+      const text = target.textContent;
+      navigator.clipboard.writeText(text).then(function() {
+        btn.textContent = 'Copied!';
+        btn.classList.add('copied');
+        setTimeout(function() {
+          btn.textContent = 'Copy';
+          btn.classList.remove('copied');
+        }, 1500);
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>`;
       const response = new Response(method === "HEAD" ? null : html, {
         headers: { "Content-Type": "text/html", ...cacheHeaders },
       });
