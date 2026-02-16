@@ -35,6 +35,307 @@ const normalizePath = (path: string): string => {
   return path.replace(/\/+$/, "").toLowerCase() || "/";
 };
 
+const ALLOWED_RATIOS: Record<string, [number, number]> = {
+  "3:2": [3, 2],
+  "4:3": [4, 3],
+};
+
+// --- PNG utilities for aspect-ratio padding ---
+
+const crc32Table = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c;
+  }
+  return t;
+})();
+
+const crc32 = (data: Uint8Array, start = 0, end = data.length): number => {
+  let crc = 0xffffffff;
+  for (let i = start; i < end; i++) crc = crc32Table[(crc ^ data[i]) & 0xff] ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
+};
+
+interface PngChunk {
+  type: string;
+  data: Uint8Array;
+}
+
+const PNG_SIGNATURE = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+
+const parsePngChunks = (buf: Uint8Array): PngChunk[] => {
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  let offset = 8; // skip signature
+  const chunks: PngChunk[] = [];
+  while (offset < buf.length) {
+    const length = view.getUint32(offset);
+    const type = String.fromCharCode(...buf.subarray(offset + 4, offset + 8));
+    const data = buf.subarray(offset + 8, offset + 8 + length);
+    chunks.push({ type, data });
+    offset += 12 + length; // 4 len + 4 type + data + 4 crc
+  }
+  return chunks;
+};
+
+const buildPng = (chunks: PngChunk[]): Uint8Array => {
+  let totalSize = 8; // signature
+  for (const c of chunks) totalSize += 12 + c.data.length;
+  const out = new Uint8Array(totalSize);
+  out.set(PNG_SIGNATURE);
+  let offset = 8;
+  for (const c of chunks) {
+    const view = new DataView(out.buffer, out.byteOffset, out.byteLength);
+    view.setUint32(offset, c.data.length);
+    const typeBytes = new Uint8Array([
+      c.type.charCodeAt(0),
+      c.type.charCodeAt(1),
+      c.type.charCodeAt(2),
+      c.type.charCodeAt(3),
+    ]);
+    out.set(typeBytes, offset + 4);
+    out.set(c.data, offset + 8);
+    const crcVal = crc32(out, offset + 4, offset + 8 + c.data.length);
+    view.setUint32(offset + 8 + c.data.length, crcVal);
+    offset += 12 + c.data.length;
+  }
+  return out;
+};
+
+const zlibDecompress = async (data: Uint8Array): Promise<Uint8Array> => {
+  const ds = new DecompressionStream("deflate");
+  const writer = ds.writable.getWriter();
+  writer.write(data);
+  writer.close();
+  const reader = ds.readable.getReader();
+  const parts: Uint8Array[] = [];
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value);
+  }
+  let totalLen = 0;
+  for (const p of parts) totalLen += p.length;
+  const result = new Uint8Array(totalLen);
+  let off = 0;
+  for (const p of parts) {
+    result.set(p, off);
+    off += p.length;
+  }
+  return result;
+};
+
+const zlibCompress = async (data: Uint8Array): Promise<Uint8Array> => {
+  const cs = new CompressionStream("deflate");
+  const writer = cs.writable.getWriter();
+  writer.write(data);
+  writer.close();
+  const reader = cs.readable.getReader();
+  const parts: Uint8Array[] = [];
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value);
+  }
+  let totalLen = 0;
+  for (const p of parts) totalLen += p.length;
+  const result = new Uint8Array(totalLen);
+  let off = 0;
+  for (const p of parts) {
+    result.set(p, off);
+    off += p.length;
+  }
+  return result;
+};
+
+const padPng = async (
+  pngBytes: Uint8Array,
+  ratioW: number,
+  ratioH: number,
+): Promise<Uint8Array | null> => {
+  // Verify PNG signature
+  for (let i = 0; i < 8; i++) {
+    if (pngBytes[i] !== PNG_SIGNATURE[i]) return null;
+  }
+
+  const chunks = parsePngChunks(pngBytes);
+  const ihdrChunk = chunks.find((c) => c.type === "IHDR");
+  if (!ihdrChunk || ihdrChunk.data.length < 13) return null;
+
+  const ihdr = new DataView(ihdrChunk.data.buffer, ihdrChunk.data.byteOffset, ihdrChunk.data.byteLength);
+  const width = ihdr.getUint32(0);
+  const height = ihdr.getUint32(4);
+  const bitDepth = ihdr.getUint8(8);
+  const colorType = ihdr.getUint8(9);
+  const interlace = ihdr.getUint8(12);
+
+  // Bail on interlaced or indexed-color PNGs
+  if (interlace !== 0 || colorType === 3) return null;
+  // Only support 8-bit depth
+  if (bitDepth !== 8) return null;
+
+  const targetHeight = Math.ceil((width * ratioH) / ratioW);
+  if (height >= targetHeight) return null; // already tall enough
+
+  const paddingRows = targetHeight - height;
+
+  // Bytes per pixel based on color type
+  let bpp: number;
+  switch (colorType) {
+    case 0: bpp = 1; break; // grayscale
+    case 2: bpp = 3; break; // RGB
+    case 4: bpp = 2; break; // grayscale + alpha
+    case 6: bpp = 4; break; // RGBA
+    default: return null;
+  }
+
+  const rowBytes = 1 + width * bpp; // filter byte + pixel data
+
+  // Concatenate all IDAT data
+  const idatParts: Uint8Array[] = [];
+  for (const c of chunks) {
+    if (c.type === "IDAT") idatParts.push(c.data);
+  }
+  let idatTotal = 0;
+  for (const p of idatParts) idatTotal += p.length;
+  const idatConcat = new Uint8Array(idatTotal);
+  let off = 0;
+  for (const p of idatParts) {
+    idatConcat.set(p, off);
+    off += p.length;
+  }
+
+  const decompressed = await zlibDecompress(idatConcat);
+
+  // White padding row for the top
+  const whitePadRow = new Uint8Array(rowBytes);
+  whitePadRow[0] = 0; // None filter
+  whitePadRow.fill(0xff, 1);
+
+  // Split padding: white on top, stretched last row on bottom
+  const topRows = Math.ceil(paddingRows / 2);
+  const bottomRows = paddingRows - topRows;
+
+  // Unfilter all rows to recover raw pixel values for the last row.
+  // PNG filters encode each byte relative to neighbors, so we must
+  // decode sequentially from the top to get correct values.
+  const pixelBytes = width * bpp;
+  const unfiltered = new Uint8Array(height * pixelBytes);
+
+  const paeth = (a: number, b: number, c: number): number => {
+    const p = a + b - c;
+    const pa = Math.abs(p - a);
+    const pb = Math.abs(p - b);
+    const pc = Math.abs(p - c);
+    if (pa <= pb && pa <= pc) return a;
+    if (pb <= pc) return b;
+    return c;
+  };
+
+  for (let row = 0; row < height; row++) {
+    const filterType = decompressed[row * rowBytes];
+    const srcOff = row * rowBytes + 1;
+    const dstOff = row * pixelBytes;
+    const prevOff = (row - 1) * pixelBytes;
+
+    for (let i = 0; i < pixelBytes; i++) {
+      const raw = decompressed[srcOff + i];
+      const a = i >= bpp ? unfiltered[dstOff + i - bpp] : 0;
+      const b = row > 0 ? unfiltered[prevOff + i] : 0;
+      const c = row > 0 && i >= bpp ? unfiltered[prevOff + i - bpp] : 0;
+
+      switch (filterType) {
+        case 0: unfiltered[dstOff + i] = raw; break;
+        case 1: unfiltered[dstOff + i] = (raw + a) & 0xff; break;
+        case 2: unfiltered[dstOff + i] = (raw + b) & 0xff; break;
+        case 3: unfiltered[dstOff + i] = (raw + ((a + b) >>> 1)) & 0xff; break;
+        case 4: unfiltered[dstOff + i] = (raw + paeth(a, b, c)) & 0xff; break;
+        default: unfiltered[dstOff + i] = raw; break;
+      }
+    }
+  }
+
+  // Re-encode all rows as filter=None using unfiltered pixel data.
+  // We can't mix filtered original data with new rows because filters
+  // reference neighboring rows, which would be wrong after insertion.
+  const lastRowPixels = unfiltered.subarray((height - 1) * pixelBytes, height * pixelBytes);
+
+  const totalRows = topRows + height + bottomRows;
+  const newData = new Uint8Array(totalRows * rowBytes);
+  let pos = 0;
+
+  // Top white padding
+  for (let r = 0; r < topRows; r++) {
+    newData.set(whitePadRow, pos);
+    pos += rowBytes;
+  }
+  // Original image rows (unfiltered)
+  for (let r = 0; r < height; r++) {
+    newData[pos] = 0; // None filter
+    newData.set(unfiltered.subarray(r * pixelBytes, (r + 1) * pixelBytes), pos + 1);
+    pos += rowBytes;
+  }
+  // Bottom: stretch last row
+  for (let r = 0; r < bottomRows; r++) {
+    newData[pos] = 0; // None filter
+    newData.set(lastRowPixels, pos + 1);
+    pos += rowBytes;
+  }
+
+  const compressed = await zlibCompress(newData);
+
+  // Rebuild chunks: update IHDR height, replace IDAT(s) with single new IDAT
+  const newIhdrData = new Uint8Array(ihdrChunk.data);
+  const newIhdrView = new DataView(newIhdrData.buffer, newIhdrData.byteOffset, newIhdrData.byteLength);
+  newIhdrView.setUint32(4, targetHeight);
+
+  const newChunks: PngChunk[] = [];
+  let idatInserted = false;
+  for (const c of chunks) {
+    if (c.type === "IHDR") {
+      newChunks.push({ type: "IHDR", data: newIhdrData });
+    } else if (c.type === "IDAT") {
+      if (!idatInserted) {
+        newChunks.push({ type: "IDAT", data: compressed });
+        idatInserted = true;
+      }
+      // skip subsequent IDAT chunks
+    } else {
+      newChunks.push(c);
+    }
+  }
+
+  return buildPng(newChunks);
+};
+
+const buildPaddedImageResponse = async (
+  ogImageUrl: string,
+  ratioW: number,
+  ratioH: number,
+): Promise<Response> => {
+  try {
+    const imgResp = await fetch(ogImageUrl);
+    if (!imgResp.ok) return buildRedirectResponse(ogImageUrl);
+
+    const contentType = imgResp.headers.get("content-type") ?? "";
+    if (!contentType.includes("png")) return buildRedirectResponse(ogImageUrl);
+
+    const buf = new Uint8Array(await imgResp.arrayBuffer());
+    const padded = await padPng(buf, ratioW, ratioH);
+    if (!padded) return buildRedirectResponse(ogImageUrl);
+
+    return new Response(padded, {
+      headers: {
+        "Content-Type": "image/png",
+        ...cacheHeaders,
+      },
+    });
+  } catch {
+    return buildRedirectResponse(ogImageUrl);
+  }
+};
+
 const getCached = (path: string): CacheEntry | null => {
   const entry = memoryCache.get(path);
   if (entry && Date.now() < entry.expires) {
@@ -124,6 +425,10 @@ export default {
     const url = new URL(request.url);
     const rawPath = url.pathname;
     const path = normalizePath(rawPath);
+
+    // Parse optional ratio param
+    const ratioParam = url.searchParams.get("ratio");
+    const ratio = ratioParam ? ALLOWED_RATIOS[ratioParam] ?? null : null;
 
     // Root path returns interactive landing page
     if (path === "/") {
@@ -227,6 +532,23 @@ export default {
   .preview-error {
     color: #f85149;
   }
+  .checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 1.5rem;
+  }
+  .checkbox-row input[type="checkbox"] {
+    width: 1rem;
+    height: 1rem;
+    accent-color: #58a6ff;
+  }
+  .checkbox-row label {
+    margin: 0;
+    font-size: 0.875rem;
+    color: #8b949e;
+    cursor: pointer;
+  }
 </style>
 </head>
 <body>
@@ -234,7 +556,12 @@ export default {
 <p class="subtitle">Redirect to GitHub og:image &middot; <a href="https://github.com/heathdutton/ghlogo">Source</a></p>
 
 <label for="input">Owner or Owner/Repo</label>
-<input type="text" id="input" placeholder="microsoft/vscode" autocomplete="off" spellcheck="false">
+<input type="text" id="input" value="microsoft/vscode" placeholder="microsoft/vscode" autocomplete="off" spellcheck="false">
+
+<div class="checkbox-row">
+  <input type="checkbox" id="ratio-toggle">
+  <label for="ratio-toggle">Normalize Aspect Ratio (3:2)</label>
+</div>
 
 <div class="output-group">
   <div class="output-label">URL</div>
@@ -271,6 +598,7 @@ export default {
 (function() {
   const baseUrl = '${baseUrl}';
   const input = document.getElementById('input');
+  const ratioToggle = document.getElementById('ratio-toggle');
   const urlOut = document.getElementById('url-output');
   const htmlOut = document.getElementById('html-output');
   const mdOut = document.getElementById('md-output');
@@ -284,7 +612,8 @@ export default {
   function update() {
     const raw = input.value.trim().replace(/^[\\/@]+/, '').replace(/\\/+$/, '');
     const path = raw || 'microsoft/vscode';
-    const fullUrl = baseUrl + '/' + path;
+    const qs = ratioToggle.checked ? '?ratio=3:2' : '';
+    const fullUrl = baseUrl + '/' + path + qs;
 
     urlOut.textContent = fullUrl;
     htmlOut.innerHTML = escapeHtml('<img src="' + fullUrl + '" alt="' + path + '">');
@@ -307,6 +636,8 @@ export default {
   }
 
   input.addEventListener('input', update);
+  ratioToggle.addEventListener('change', update);
+  update();
 
   document.querySelectorAll('.copy-btn').forEach(function(btn) {
     btn.addEventListener('click', function() {
@@ -344,9 +675,9 @@ export default {
     // Check in-memory cache
     const memoryCached = getCached(path);
     if (memoryCached) {
-      return memoryCached.url
-        ? buildRedirectResponse(memoryCached.url)
-        : build404Response();
+      if (!memoryCached.url) return build404Response();
+      if (ratio) return buildPaddedImageResponse(memoryCached.url, ratio[0], ratio[1]);
+      return buildRedirectResponse(memoryCached.url);
     }
 
     // Fetch from GitHub
@@ -355,6 +686,8 @@ export default {
     // Cache the result (including 404s)
     setCache(path, ogImage);
 
-    return ogImage ? buildRedirectResponse(ogImage) : build404Response();
+    if (!ogImage) return build404Response();
+    if (ratio) return buildPaddedImageResponse(ogImage, ratio[0], ratio[1]);
+    return buildRedirectResponse(ogImage);
   },
 } satisfies ExportedHandler;
